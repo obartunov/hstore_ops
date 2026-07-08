@@ -48,6 +48,16 @@ SELECT id FROM hht WHERE h ?& ARRAY['a','nope'] ORDER BY id;
 -- recheck flag must be set: the bitmap heap scan carries a Recheck Cond
 SELECT count(*) FROM hht WHERE h @> 'a=>1';
 
+-- @yoda: triConsistent must be fail-closed for the hash opclass.
+-- A required pair whose hash is absent must prune to no candidates (GIN_FALSE),
+-- never a false positive; a fully-missing pair returns nothing.
+SELECT id FROM hht WHERE h @> 'missing=>value' ORDER BY id;
+-- "existing key + existing value, but never as the same pair" -> empty, and
+-- the pair-level index yields zero candidates (nothing to recheck away).
+SELECT id FROM hht WHERE h @> 'shared=>v1, other=>b' ORDER BY id;
+-- recheck must be visible in the plan (mandatory because hashing is lossy).
+EXPLAIN (COSTS OFF) SELECT count(*) FROM hht WHERE h @> 'shared=>v1, other=>b';
+
 RESET enable_seqscan;
 DROP TABLE hht;
 DROP EXTENSION hstore_hash_ops;
