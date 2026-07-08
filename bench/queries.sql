@@ -1,0 +1,13 @@
+-- bench/queries.sql : the probe set (informational; bench/run.sh drives measurement).
+-- hstore predicates (std / hash opclass):
+--   q1 selective     : h @> 'shard=>S777'
+--   q2 medium        : h @> 'env=>prod'
+--   q3 multi-pair    : h @> 'env=>prod, tier=>gold'
+--   q4 neg-lookup    : h @> 'env=>gold'          -- 0 rows; both tokens common
+--   q5 key-exists    : h ? 'shard'
+-- jsonb predicates (jsonb_ops / jsonb_path_ops), identical logical data:
+--   q1 : j @> '{"shard":"S777"}'
+--   q2 : j @> '{"env":"prod"}'
+--   q3 : j @> '{"env":"prod","tier":"gold"}'
+--   q4 : j @> '{"env":"gold"}'
+--   q5 : j ? 'shard'                             -- jsonb_path_ops: unsupported
