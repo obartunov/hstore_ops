@@ -3,16 +3,18 @@
 `gin_hstore_pair_ops` provides an exact, recheck-free GIN representation for
 both hstore containment (`@>`) and key-existence (`?`, `?|`, `?&`) operators by
 indexing separate key entries and key/value entries. It is **universal by
-semantics, not by cost**: it covers every hstore GIN operator exactly, but it
-trades a larger index and slower build for that exactness.
+operator semantics, not by data domain**: it covers every hstore GIN operator
+exactly, but because it indexes exact key/value bytes it inherits GIN
+entry-size limits for long or high-entropy values, and it trades a larger index
+and slower build for that exactness.
 
 It sits alongside two other opclasses for the same type:
 
 | opclass | representation | profile |
 |---|---|---|
-| `gin_hstore_ops` (default) | key and value indexed separately | legacy/generic baseline; `@>` is lossy (rechecks) |
-| `gin_hstore_hash_ops` | 64-bit `hash(key,value)` per pair | compact, lossy, always rechecked; best negative/selective profile |
-| **`gin_hstore_pair_ops`** | exact `K(key)` + `P(key,value)` entries | exact, recheck-free; best multi-pair containment and key-existence |
+| `gin_hstore_ops` (default) | key and value indexed separately | legacy/generic baseline; `@>` is lossy (rechecks); exact-byte entries can fail on long/high-entropy values |
+| `gin_hstore_hash_ops` | 64-bit `hash(key,value)` per pair | compact, lossy, always rechecked; best negative/selective profile; **robust to arbitrary long/high-entropy values — often the only buildable opclass** |
+| **`gin_hstore_pair_ops`** | exact `K(key)` + `P(key,value)` entries | exact, recheck-free; best multi-pair containment and key-existence; **bounded** by the GIN entry-size limit for exact values |
 
 ## 1. Semantics
 
@@ -145,20 +147,27 @@ only usable GIN opclass of the three.
 
 ## 4. Conclusion
 
-`gin_hstore_pair_ops` is **not a universal winner** on cost. It is a
-**universal exact opclass**: one representation that answers hstore containment
-and key-existence exactly, with no recheck.
+`gin_hstore_pair_ops` is **not a universal winner** on cost, and not universal
+across the data domain. It is an **exact, bounded opclass**: one representation
+that answers hstore containment and key-existence exactly and recheck-free, as
+long as the exact key/value entries fit the GIN entry-size limit.
 
-Best niche: multi-pair containment and key-existence-heavy workloads, and any
-workload where exact, recheck-free semantics matter more than index size and
-build time. The hash opclass remains useful as the compact, lossy profile with
-the best negative-lookup and single-pair selectivity, and the default opclass
-remains the smallest generic baseline.
+The story is not "hash vs pair, choose one". hstore has two useful non-default
+GIN representations, and both are worth keeping:
+
+* **hash** — bounded-size lossy hashed entries; mandatory recheck; **robust to
+  arbitrary long/high-entropy values** (often the only buildable opclass, e.g.
+  on `hstore(pg_proc)`); best negative-lookup and single-pair selectivity.
+* **pair** — exact tagged entries; recheck-free and semantically clean;
+  strongest on multi-pair `@>` and key-existence; bounded by the entry-size
+  limit for exact values; larger index and slower build.
+
+The default opclass remains the smallest generic baseline (and shares pair's
+long-value limit). See `FINDINGS.md` for the pg_proc benchmark behind this.
 
 The strong claim is not "a faster hstore index." The strong claim is:
 
 > `gin_hstore_pair_ops` provides an exact, recheck-free GIN representation for
 > both hstore containment and key-existence operators by indexing separate key
-> and key/value entries.
-
-Note the entry-size limitation above: `pair_ops` (like the default opclass) cannot index hstore with long high-entropy values; only `gin_hstore_hash_ops` can.
+> and key/value entries — universal by operator semantics, bounded by data
+> domain.
