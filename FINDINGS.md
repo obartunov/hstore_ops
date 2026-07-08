@@ -50,12 +50,16 @@ bytes, so all three build. Same 3512 rows, query `@> 'proargtypes=>"2275"'`
 | **hash** | **600 kB** | 86, 0 removed | **0.122 ms** |
 | pair | 1024 kB | 86, recheck-free | 0.118 ms |
 
-Here the 2014 claims hold: **hash is ~24% smaller and ~6× faster than the
-default** opclass. The default opclass indexes key and value separately, so
-`proargtypes=>"2275"` intersects the `proargtypes` key list with the `2275`
-value list into 199 candidates and rechecks 113 false pairs away; hash indexes
-the pair as one 8-byte entry (86 exact). pair matches hash on speed (both avoid
-recheck) but is the largest index.
+On this subset the 2014 claims hold: hash happens to be ~24% smaller and ~6×
+faster than the default here. But "smaller" is **not a universal property of
+hash** — it follows from the exact text/pair entries being relatively large or
+high-cardinality on this data. The default opclass indexes key and value
+separately, so `proargtypes=>"2275"` intersects the `proargtypes` key list with
+the `2275` value list into 199 candidates and rechecks 113 false pairs away;
+hash indexes the pair as one fixed 8-byte entry (86 exact), so it is both
+smaller and faster *here*. On short-value workloads (see the size profile in §3)
+the picture reverses. pair matches hash on speed (both avoid recheck) but is the
+largest index.
 
 ## 2. Three opclass profiles
 
@@ -75,6 +79,26 @@ multi-pair containment and key-existence. Limited by the GIN entry-size limit
 for exact values; largest index and slowest build.
 
 ## 3. Long / high-entropy value limit
+
+### Size profile across workloads
+
+Hash does not give a smaller index universally. It has **bounded entry size**
+(every pair is 8 bytes), which makes it robust to long/high-entropy values and
+can make it smaller when the exact text/pair entries are large or unbuildable —
+but on short-value workloads the default opclass's raw text entries are compact
+and GIN deduplicates them well, so the default can be the same size or smaller.
+
+| workload | default | hash | pair | conclusion |
+|---|---|---|---|---|
+| short synthetic values (1M) | 29 MB | 31 MB | 41 MB | hash not smaller |
+| pg_proc buildable subset | 792 kB | 600 kB | 1024 kB | hash smaller |
+| full pg_proc (long values) | FAIL | 840 kB | FAIL | hash only buildable |
+| high-entropy long values | FAIL | OK | FAIL | hash only buildable |
+
+Build failure of default/pair on full `hstore(pg_proc)` is a first-class
+result, not a footnote.
+
+### Why exact entries fail
 
 Exact-byte opclasses (default, pair) fail to build when a single key or value
 does not compress below the GIN per-entry limit (~2712 bytes on an 8 KB page).
@@ -109,9 +133,10 @@ opclasses return the same count.
 The story is not "hash vs pair, choose one". hstore has two useful non-default
 GIN representations, and both are worth keeping:
 
-- **hash** — bounded-size lossy representation; robust and compact; suitable
-  for arbitrary hstore values, including long/high-entropy ones. On real
-  catalog data it is often the only buildable opclass.
+- **hash** — bounded-size lossy representation; robust to long/high-entropy
+  values; may be smaller when exact entries are large, but not guaranteed
+  smaller on short-value workloads. On real catalog data it is often the only
+  buildable opclass.
 - **pair** — exact tagged representation; recheck-free and semantically clean;
   suitable when values are bounded enough to fit as exact GIN entries; strongest
   for multi-pair `@>` and key-existence.
@@ -119,3 +144,7 @@ GIN representations, and both are worth keeping:
 pair is universal by operator semantics, not by data domain. The pg_proc result
 makes hash historically and technically central again: it is the representation
 that keeps working when exact entries cannot.
+
+**hash is not the universal size winner; it is the bounded/robust profile. pair
+is the exact/recheck-free profile. default remains a strong compact baseline for
+short values.**

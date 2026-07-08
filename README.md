@@ -88,8 +88,17 @@ a pair (negative lookup) — the default opclass fetches and rechecks a large
 fraction of the table; this opclass answers from the index with no heap access
 (~2000–4000× on 1M rows: ≈190 ms → ≈0.05–0.10 ms per query, repeated-subquery method). Also faster on multi-pair `@>`, and ~2× faster to build.
 
-Does **not** help: it is **not** smaller than the default opclass on flat data
-under modern GIN posting-list compression (measured ~6% larger at 1M rows);
+Also helps structurally: hash entries are a fixed 8 bytes, so this opclass has a
+**bounded entry size** and is **robust to long/high-entropy values**. On data
+where a value is too large to fit as an exact GIN entry (e.g. `hstore(pg_proc)`
+with `prosrc`/`prosqlbody`), the default opclass and the exact pair opclass fail
+to build while hash still builds — sometimes hash is the only buildable opclass.
+In that regime hash is also smaller. See `FINDINGS.md`.
+
+Does **not** help: it is **not** smaller than the default opclass on short-value
+flat data under modern GIN posting-list compression (measured ~6% larger at 1M
+rows) — "hash is smaller" is not a universal property, only a consequence of
+large/high-entropy exact entries;
 `?`/`?|`/`?&` key-existence is marginally slower (partial match, both sub-ms);
 selective single-pair `@>` is a tie (0.32 vs 0.33 ms per query).
 

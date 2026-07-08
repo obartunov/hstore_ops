@@ -76,6 +76,14 @@ penalty shrinks with scale (+13% at 100k → +5.7% at 1M) but stayed positive.
 Build is ~2.1× faster (integer keys, no collation-aware text compares).
 `jsonb_path_ops` — the same pair-hash idea — mirrors the hash opclass exactly.
 
+This is a **short-value** result and does not generalize: "hash is smaller" is
+not a universal property. The hash opclass's real structural property is a
+**bounded entry size** (every pair is a fixed 8 bytes), which makes it robust to
+long/high-entropy values and can make it smaller — or the only buildable
+opclass — when exact text/pair entries are large. On real catalog data
+(`hstore(pg_proc)`) the default opclass and the exact pair opclass fail to build
+at all while hash builds; see `FINDINGS.md` for that comparison.
+
 ## Query latency (1,000,000 rows; repeated-subquery per-query, ms)
 
 | query | seqscan | default | hash | jsonb_ops | jsonb_path_ops | rows |
