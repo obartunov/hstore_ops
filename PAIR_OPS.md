@@ -40,6 +40,11 @@ different byte strings even though their concatenations are equal. This is what
 makes "`P(k,v)` present ⟺ the row contains exactly the pair (k,v)" hold, and it
 is verified at runtime (`@> 'ab=>c'` and `@> 'a=>bc'` return disjoint rows).
 
+The `klen:int32` field is stored in native-endian form. This is acceptable for
+a physical GIN index representation: index files are platform-local artifacts,
+and dump/restore rebuilds the index from logical hstore values rather than
+copying the physical byte ordering across architectures.
+
 ### hstore NULL vs empty string vs the string "NULL"
 
 The pair entry's discriminator byte distinguishes a SQL-NULL value
