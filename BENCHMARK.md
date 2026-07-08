@@ -34,11 +34,20 @@ compression makes the default opclass ~6% **smaller**, not larger. And
   extremely common — the negative-lookup stress case.
 * Each index config is measured **in isolation** (competitors dropped,
   `enable_seqscan=off`) so the planner is forced onto the intended path.
-* Latency = median of 7 warm `EXPLAIN (ANALYZE)` runs for the hstore `@>`
-  probes, median of 5 for the jsonb probes, each preceded by a warm-up run;
-  measured on an otherwise-idle server (an early single run showed a ~13 ms
-  outlier on q1/hash under load that disappeared once quiesced — hence medians).
-  Raw plans in `bench/raw/`. Runner: `bench/run.sh`.
+* Latency = **repeated-subquery timing** (the amplification method): the same
+  scalar subquery is placed `N` times, comma-separated, in the target list of a
+  single `SELECT`, run under `\timing`; per-query time = total / `N`. Planning
+  happens once; the `N` copies are separate InitPlans, each executed once
+  (verified: three identical copies produce `InitPlan expr_1/2/3`, not folded to
+  one). This removes per-node `EXPLAIN ANALYZE` instrumentation and one-shot
+  round-trip/planning overhead, which matters for the sub-millisecond point
+  lookups. `N=100` for the fast probes, `N=20` for the low-selectivity ones; the
+  first execution warms the cache. Generator: `bench/repeat.sh`.
+  (An earlier draft of this report used median-of-N separate `EXPLAIN ANALYZE`
+  runs; that inflated the sub-ms lookups ~1.5–2× and made q1 look like a small
+  default-opclass win — an instrumentation artifact. The corrected method below
+  shows q1 is a tie.) Structural raw plans for the decisive case in `bench/raw/`.
+  Config runner (sizes/build/CSV): `bench/run.sh`.
 * Correctness (separate from performance): `correctness.sql`, index-vs-seqscan
   oracle, 30/30 probes identical.
 
@@ -67,21 +76,29 @@ penalty shrinks with scale (+13% at 100k → +5.7% at 1M) but stayed positive.
 Build is ~2.1× faster (integer keys, no collation-aware text compares).
 `jsonb_path_ops` — the same pair-hash idea — mirrors the hash opclass exactly.
 
-## Query latency (1,000,000 rows; warm median, ms)
+## Query latency (1,000,000 rows; repeated-subquery per-query, ms)
 
 | query | seqscan | default | hash | jsonb_ops | jsonb_path_ops | rows |
 |---|---:|---:|---:|---:|---:|---:|
-| q1 selective `@>` (`shard=>S777`) | 183.8 | **0.495** | 0.767 | 0.83 | 0.79 | 1000 |
-| q2 medium `@>` (`env=>prod`) | 204.3 | 220.2 | **194.9** | 256.7 | 244.8 | 333756 |
-| q3 multi `@>` (`env=>prod,tier=>gold`) | 194.7 | 159.5 | **128.2** | 178.9 | 155.2 | 110641 |
-| **q4 negative `@>` (`env=>gold`)** | 184.4 | 203.3 | **0.080** | 237.7 | 0.055 | 0 |
-| q5 key-exists `?` (`shard`) | 168.9 | **0.48** | 0.56 | 0.60 | n/a | 1000 |
+| q1 selective `@>` (`shard=>S777`) | ~184 | 0.320 | 0.331 | 1.00 | 0.99 | 1000 |
+| q2 medium `@>` (`env=>prod`) | ~204 | 188.0 | **148.6** | 374.0 | 362.0 | 333756 |
+| q3 multi `@>` (`env=>prod,tier=>gold`) | ~195 | 131.7 | **97.2** | 226.6 | 211.0 | 110641 |
+| **q4 negative `@>` (`env=>gold`)** | ~184 | 198.0 | **0.050** | 360.1 | 0.064 | 0 |
+| q5 key-exists `?` (`shard`) | ~169 | **0.201** | 0.276 | ~0.6 | n/a | 1000 |
 
-Bold = fastest in row. `jsonb_path_ops` does not support `?` (n/a). The default
-opclass edges out the hash opclass on the two sub-millisecond point lookups
-(q1, q5) — both all-rare-token queries where the default's two tiny posting
-lists intersect to the exact answer cheaply. The hash opclass wins q2/q3 and,
-decisively, q4.
+Bold = fastest in row (seqscan column is an approximate baseline, single-node so
+instrumentation-insensitive; not re-measured with the repeated method). `jsonb_path_ops`
+has no `?` (n/a). Notes:
+
+* **q1 selective is a tie** (0.320 vs 0.331 ms) — the earlier "default wins q1"
+  reading was `EXPLAIN ANALYZE` overhead, not a real difference.
+* **q4 negative** is the decisive case: the hash opclass is **~2000–4000×** faster (run-to-run variance, single core)
+  than the default (198.0 → 0.050 ms). Among jsonb opclasses the split is the
+  same, several thousand× (`jsonb_path_ops` 0.064 vs `jsonb_ops` 360.1 ms).
+* q2/q3 low-selectivity `@>`: hash is 27–35% faster than default, but all are
+  heap-bound. jsonb `@>` is ~2× slower than hstore `@>` here (pricier per-tuple
+  recheck on the jsonb representation), independent of opclass.
+* q5 key-exists: default marginally ahead (both sub-ms; `?` uses partial match).
 
 ### The decisive case: q4 negative lookup
 
@@ -115,21 +132,19 @@ Aggregate (actual time=0.024..0.024 rows=1.00)
               Index Cond: (h @> '"env"=>"gold"'::hstore)
 ```
 
-~2500× faster (203.3 → 0.080 ms median; the single plans above show
-198.5 → 0.024 ms), 39115 → 4 buffers, 333575 → 0 rechecked. `jsonb_path_ops`
-behaves identically (0.055 ms median). This is the mechanism working exactly as
-designed: indexing the pair as a unit turns a table-scan-sized recheck into an
-index miss.
+~2000–4000× faster by the repeated-subquery method (≈188–198 ms → ≈0.05–0.10 ms
+per query across runs on a loaded single core; the
+single instrumented plans above show 198.5 → 0.024 ms), 39115 → 4 buffers,
+333575 → 0 rechecked. `jsonb_path_ops` behaves identically (0.064 ms). This is
+the mechanism working exactly as designed: indexing the pair as a unit turns a
+table-scan-sized recheck into an index miss.
 
 ### Where it does not win
 
-* q1 selective `@>` and q5 key-exists `?`: the default opclass is marginally
-  faster (q1 0.50 vs 0.77 ms; q5 0.48 vs 0.56 ms). Both are sub-millisecond
-  point lookups; `?` goes through partial match on the key hash, and q1's query
-  tokens are individually rare so the default's two-posting-list intersection is
-  already tight. Not a practically meaningful gap, but the hash opclass does not
-  win here.
-* q2/q3 low-selectivity `@>`: the hash opclass is 12–20% faster, but all
+* q1 selective `@>`: a tie (0.320 vs 0.331 ms). q5 key-exists `?`: default
+  marginally ahead (0.201 vs 0.276 ms). Both are sub-millisecond point lookups;
+  `?` goes through partial match on the key hash. No practically meaningful gap.
+* q2/q3 low-selectivity `@>`: the hash opclass is 27–35% faster, but all
   configs are heap-bound (fetching 36–39k blocks for 100–330k result rows) and
   barely beat the seqscan — not an index-selectivity story.
 * Size: loses to the default opclass (above).
@@ -157,5 +172,6 @@ regression (`sql/`, `expected/`) passes.
 So it is worth maintaining as an extension for users committed to the `hstore`
 type who want `jsonb_path_ops`-style `@>` selectivity without migrating — but it
 is **not** a compelling `contrib`/core addition, because core already covers the
-same ground for `jsonb`. No claim in this report is made without the raw
-`EXPLAIN`/size artifacts in `bench/raw/`.
+same ground for `jsonb`. Reproducers and artifacts: `bench/run.sh` (sizes /
+build / CSV), `bench/repeat.sh` (per-query latency), decisive raw plans in
+`bench/raw/`, results in `bench/summary_1m.csv`.

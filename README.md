@@ -86,12 +86,12 @@ the server include dir).
 Helps a lot: `@>` where a common key and a common value never occur together as
 a pair (negative lookup) — the default opclass fetches and rechecks a large
 fraction of the table; this opclass answers from the index with no heap access
-(~2500× on 1M rows: 203 ms → 0.08 ms median). Also faster on multi-pair `@>`, and ~2× faster to build.
+(~2000–4000× on 1M rows: ≈190 ms → ≈0.05–0.10 ms per query, repeated-subquery method). Also faster on multi-pair `@>`, and ~2× faster to build.
 
 Does **not** help: it is **not** smaller than the default opclass on flat data
 under modern GIN posting-list compression (measured ~6% larger at 1M rows);
-`?`/`?|`/`?&` key-existence is marginally slower (partial match); selective
-single-pair `@>` is a wash (default marginally ahead, both sub-ms).
+`?`/`?|`/`?&` key-existence is marginally slower (partial match, both sub-ms);
+selective single-pair `@>` is a tie (0.32 vs 0.33 ms per query).
 
 `jsonb_path_ops` (in core) uses the same pair-hashing idea for `jsonb` and
 matches this opclass's `@>` performance. The distinct value here is bringing
