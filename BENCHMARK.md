@@ -17,7 +17,7 @@ compression makes the default opclass ~6% **smaller**, not larger. And
 | build | gcc 13.3.0, `CFLAGS=-O2`, `--without-icu --without-readline`, cassert OFF |
 | kernel | Linux 6.18.5 x86_64 |
 | cpu / mem | 1 vCPU, 3.9 GiB (constrained container — see *Scope*) |
-| GUCs | shared_buffers=1GB, work_mem=64MB, maintenance_work_mem=512MB, effective_cache_size=2GB, max_parallel_workers_per_gather=0, autovacuum=off |
+| GUCs | shared_buffers=512MB, work_mem=64MB, maintenance_work_mem=256MB (128MB for the jsonb_path_ops build), effective_cache_size=1536MB, max_parallel_workers_per_gather=0, fsync=off, synchronous_commit=off, full_page_writes=off, autovacuum=off |
 | extension | `hstore_hash_ops` 1.0 (this branch) |
 
 ## Methodology
@@ -34,47 +34,54 @@ compression makes the default opclass ~6% **smaller**, not larger. And
   extremely common — the negative-lookup stress case.
 * Each index config is measured **in isolation** (competitors dropped,
   `enable_seqscan=off`) so the planner is forced onto the intended path.
-* Latency = best of 3 warm `EXPLAIN (ANALYZE, BUFFERS)` runs. Raw plans in
-  `bench/results/raw_*.txt`. Runner: `bench/run.sh`.
+* Latency = median of 7 warm `EXPLAIN (ANALYZE)` runs for the hstore `@>`
+  probes, median of 5 for the jsonb probes, each preceded by a warm-up run;
+  measured on an otherwise-idle server (an early single run showed a ~13 ms
+  outlier on q1/hash under load that disappeared once quiesced — hence medians).
+  Raw plans in `bench/raw/`. Runner: `bench/run.sh`.
 * Correctness (separate from performance): `correctness.sql`, index-vs-seqscan
   oracle, 30/30 probes identical.
 
 ## Scope / caveats
 
-Run at **1,000,000 rows** (headline) and 50,000 (smoke); both agree. 5M/10M and
+Run at **1,000,000 rows** (headline) and 100,000 (smoke); both agree. 5M/10M and
 20–50-pair "medium dictionary" shapes were **not** run — single-core / 3.9 GiB
 container. The findings that carry weight here (build time, index size,
 negative-lookup latency, recheck volume) are structural and stable across the
 two scales measured; the low-selectivity `@>` numbers are heap-bound and should
 be read as "no meaningful difference", not precise ratios.
 
-## Index size and build time (1,000,000 rows; heap = 468 MB)
+## Index size and build time (1,000,000 rows; heap = 491 MB)
 
 | opclass | column | index size | vs default | build time | vs default |
 |---|---|---:|---:|---:|---:|
-| `gin_hstore_ops` (default) | hstore | 27.82 MB | — | 6.69 s | — |
-| **`gin_hstore_hash_ops`** | hstore | **29.41 MB** | **+5.7%** | **2.91 s** | **0.43× (2.3× faster)** |
-| `jsonb_ops` | jsonb | 27.82 MB | −0.0% | 5.52 s | 0.82× |
-| `jsonb_path_ops` | jsonb | 29.40 MB | +5.7% | 3.29 s | 0.49× |
+| `gin_hstore_ops` (default) | hstore | 29.17 MB | — | 6.65 s | — |
+| **`gin_hstore_hash_ops`** | hstore | **30.83 MB** | **+5.7%** | **3.12 s** | **0.47× (2.1× faster)** |
+| `jsonb_ops` | jsonb | 29.17 MB | −0.0% | 5.52 s | 0.83× |
+| `jsonb_path_ops` | jsonb | 30.83 MB | +5.7% | 3.39 s | 0.51× |
 
 The hash opclass is **larger**, not smaller. Splitting each pair into its own
 GIN key produces many more distinct keys with short posting lists; the default
 opclass's few keys with long, delta-compressed posting lists pack tighter. The
-penalty shrinks with scale (+57% at 50k → +6% at 1M) but stayed positive.
-Build is ~2.3× faster (integer keys, no collation-aware text compares).
+penalty shrinks with scale (+13% at 100k → +5.7% at 1M) but stayed positive.
+Build is ~2.1× faster (integer keys, no collation-aware text compares).
 `jsonb_path_ops` — the same pair-hash idea — mirrors the hash opclass exactly.
 
-## Query latency (1,000,000 rows; best-of-3 warm, ms)
+## Query latency (1,000,000 rows; warm median, ms)
 
-| query | seqscan | default | **hash** | jsonb_ops | jsonb_path_ops | rows |
+| query | seqscan | default | hash | jsonb_ops | jsonb_path_ops | rows |
 |---|---:|---:|---:|---:|---:|---:|
-| q1 selective `@>` (`shard=>S777`) | 171.6 | 0.67 | **0.65** | 0.71 | 0.71 | 1000 |
-| q2 medium `@>` (`env=>prod`) | 206.4 | 189.8 | **164.1** | 220.1 | 205.1 | 333756 |
-| q3 multi `@>` (`env=>prod,tier=>gold`) | 194.8 | 132.1 | **107.1** | 154.1 | 125.7 | 110641 |
-| **q4 negative `@>` (`env=>gold`)** | 184.3 | 168.5 | **0.12** | 202.5 | 0.06 | 0 |
-| q5 key-exists `?` (`shard`) | 158.5 | 0.52 | 0.54 | 0.60 | n/a | 1000 |
+| q1 selective `@>` (`shard=>S777`) | 183.8 | **0.495** | 0.767 | 0.83 | 0.79 | 1000 |
+| q2 medium `@>` (`env=>prod`) | 204.3 | 220.2 | **194.9** | 256.7 | 244.8 | 333756 |
+| q3 multi `@>` (`env=>prod,tier=>gold`) | 194.7 | 159.5 | **128.2** | 178.9 | 155.2 | 110641 |
+| **q4 negative `@>` (`env=>gold`)** | 184.4 | 203.3 | **0.080** | 237.7 | 0.055 | 0 |
+| q5 key-exists `?` (`shard`) | 168.9 | **0.48** | 0.56 | 0.60 | n/a | 1000 |
 
-`jsonb_path_ops` does not support `?` (n/a).
+Bold = fastest in row. `jsonb_path_ops` does not support `?` (n/a). The default
+opclass edges out the hash opclass on the two sub-millisecond point lookups
+(q1, q5) — both all-rare-token queries where the default's two tiny posting
+lists intersect to the exact answer cheaply. The hash opclass wins q2/q3 and,
+decisively, q4.
 
 ### The decisive case: q4 negative lookup
 
@@ -85,42 +92,44 @@ the pair `env=>gold` exists nowhere. Raw plans (last of 3 runs):
 fetches a third of the table, and recheck discards all of it:
 
 ```
-Aggregate (actual time=167.904..167.906 rows=1.00)
+Aggregate (actual time=198.465..198.467 rows=1.00)
   Buffers: shared hit=39115
   ->  Bitmap Heap Scan on bench (rows=0.00)
         Recheck Cond: (h @> '"env"=>"gold"'::hstore)
         Rows Removed by Index Recheck: 333575
         Heap Blocks: exact=38833
         Buffers: shared hit=39115
-        ->  Bitmap Index Scan on bx (rows=333575.00)
-              Buffers: shared hit=282
- Execution Time: 168.481 ms
+        ->  Bitmap Index Scan on bx (actual time=43.437..43.438 rows=333575.00)
 ```
 
 **`gin_hstore_hash_ops`** — the pair hash is simply absent; answered from the
 index with 4 buffers and no heap access:
 
 ```
-Aggregate (actual time=0.019..0.019 rows=1.00)
+Aggregate (actual time=0.024..0.024 rows=1.00)
   Buffers: shared hit=4
   ->  Bitmap Heap Scan on bench (rows=0.00)
         Recheck Cond: (h @> '"env"=>"gold"'::hstore)
         Buffers: shared hit=4
-        ->  Bitmap Index Scan on bx (rows=0.00)
-              Buffers: shared hit=4
- Execution Time: 0.122 ms
+        ->  Bitmap Index Scan on bx (actual time=0.015..0.015 rows=0.00)
+              Index Cond: (h @> '"env"=>"gold"'::hstore)
 ```
 
-~1380× faster, 39115 → 4 buffers, 333575 → 0 rechecked. `jsonb_path_ops`
-behaves identically (0.056 ms). This is the mechanism working exactly as
+~2500× faster (203.3 → 0.080 ms median; the single plans above show
+198.5 → 0.024 ms), 39115 → 4 buffers, 333575 → 0 rechecked. `jsonb_path_ops`
+behaves identically (0.055 ms median). This is the mechanism working exactly as
 designed: indexing the pair as a unit turns a table-scan-sized recheck into an
 index miss.
 
 ### Where it does not win
 
-* q1 selective and q5 key-exists: tied with the default opclass (both ~0.5 ms).
-  `?` is a hair slower via partial match.
-* q2/q3 low-selectivity `@>`: the hash opclass is 13–19% faster, but all
+* q1 selective `@>` and q5 key-exists `?`: the default opclass is marginally
+  faster (q1 0.50 vs 0.77 ms; q5 0.48 vs 0.56 ms). Both are sub-millisecond
+  point lookups; `?` goes through partial match on the key hash, and q1's query
+  tokens are individually rare so the default's two-posting-list intersection is
+  already tight. Not a practically meaningful gap, but the hash opclass does not
+  win here.
+* q2/q3 low-selectivity `@>`: the hash opclass is 12–20% faster, but all
   configs are heap-bound (fetching 36–39k blocks for 100–330k result rows) and
   barely beat the seqscan — not an index-selectivity story.
 * Size: loses to the default opclass (above).
@@ -149,4 +158,4 @@ So it is worth maintaining as an extension for users committed to the `hstore`
 type who want `jsonb_path_ops`-style `@>` selectivity without migrating — but it
 is **not** a compelling `contrib`/core addition, because core already covers the
 same ground for `jsonb`. No claim in this report is made without the raw
-`EXPLAIN`/size artifacts in `bench/results/`.
+`EXPLAIN`/size artifacts in `bench/raw/`.

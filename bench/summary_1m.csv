@@ -1,0 +1,13 @@
+# hstore_hash_ops benchmark, 1,000,000 rows, PG 20devel @ 16a4b3ef8ee, -O2 (cassert off)
+# heap = 491 MB. Latency = warm median (ms). See BENCHMARK.md for methodology and raw plans.
+metric,gin_hstore_ops,gin_hstore_hash_ops,jsonb_ops,jsonb_path_ops
+index_size_mb,29.17,30.83,29.17,30.83
+build_time_s,6.65,3.12,5.52,3.39
+q1_selective_at_shard_S777_ms,0.495,0.767,0.83,0.79
+q2_medium_at_env_prod_ms,220.2,194.9,256.7,244.8
+q3_multi_at_env_prod_tier_gold_ms,159.5,128.2,178.9,155.2
+q4_negative_at_env_gold_ms,203.3,0.080,237.7,0.055
+q4_negative_rows_removed_by_recheck,333575,0,333575,0
+q5_key_exists_shard_ms,0.48,0.56,0.60,n/a
+# result-set sizes: q1=1000 q2=333756 q3=110641 q4=0 q5=1000
+# seqscan baseline (@>): q1..q5 = 183.8 / 204.3 / 194.7 / 184.4 / 168.9 ms

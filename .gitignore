@@ -4,5 +4,4 @@
 results/
 regression.diffs
 regression.out
-/bench/results/latency.tsv
-/bench/results/sizes.tsv
+tmp_check/

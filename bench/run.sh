@@ -1,78 +1,66 @@
 #!/usr/bin/env bash
-# bench/run.sh : reproducible hstore hash-opclass benchmark against PG master.
-# Usage: NROWS=1000000 bench/run.sh
-# Requires a running server with extensions hstore + hstore_hash_ops installed,
-# psql on PATH, PGUSER=postgres (trust). Each index config is measured in
-# isolation (competitors dropped, enable_seqscan=off).
-set -u
+# bench/run.sh NROWS  -- reproducible hstore hash-opclass benchmark on PG master.
+set -uo pipefail
+NROWS="${1:-1000000}"
+DB=bench
 HERE="$(cd "$(dirname "$0")" && pwd)"
-NROWS="${NROWS:-1000000}"
-DB="${DB:-bench}"
-OUT="${OUT:-$HERE/results}"
-GEN="${GEN:-$HERE/gen.sql}"
-PSQL="psql -U ${PGUSER:-postgres} -d $DB -X -q -v ON_ERROR_STOP=1"
-mkdir -p "$OUT"; : > "$OUT/latency.tsv"; : > "$OUT/sizes.tsv"
-q() { psql -U "${PGUSER:-postgres}" -d "$DB" -X -tA -c "$1"; }
-
-echo "== load $NROWS rows =="
-psql -U "${PGUSER:-postgres}" -d "$DB" -X -q -v nrows="$NROWS" -f "$GEN" >/dev/null
-printf 'nrows\t%s\n' "$NROWS" >> "$OUT/sizes.tsv"
-printf 'heap_bytes\t%s\n' "$(q "SELECT pg_relation_size('bench');")" >> "$OUT/sizes.tsv"
-
-declare -A IDX=(
-  [std]="CREATE INDEX bx ON bench USING gin (h gin_hstore_ops);"
-  [hash]="CREATE INDEX bx ON bench USING gin (h gin_hstore_hash_ops);"
-  [jsonb_ops]="CREATE INDEX bx ON bench USING gin (j jsonb_ops);"
-  [jpath]="CREATE INDEX bx ON bench USING gin (j jsonb_path_ops);"
+RAW="$HERE/raw"; mkdir -p "$RAW"
+CSV="$HERE/summary.csv"
+PSQL="psql -U postgres -d $DB -X -q -v ON_ERROR_STOP=1"
+echo "config,metric,value" > "$CSV"
+psql -U postgres -X -q -c "DROP DATABASE IF EXISTS $DB;" -c "CREATE DATABASE $DB;"
+$PSQL -c "CREATE EXTENSION hstore; CREATE EXTENSION hstore_hash_ops;"
+echo ">> generating $NROWS rows"
+$PSQL -v nrows="$NROWS" -f "$HERE/gen.sql" >/dev/null
+HEAP=$($PSQL -tAc "SELECT pg_relation_size('bench')")
+echo "none,heap_bytes,$HEAP" >> "$CSV"
+declare -a HPROBES=(
+  "sel_hstore|h|h @> 'shard=>S777'"
+  "med_hstore|h|h @> 'env=>prod'"
+  "multi_hstore|h|h @> 'env=>prod, tier=>gold'"
+  "neg_hstore|h|h @> 'env=>gold'"
+  "exists_hstore|h|h ? 'shard'"
 )
-declare -A H=(
-  [q1_selective]="h @> 'shard=>S777'"
-  [q2_medium]="h @> 'env=>prod'"
-  [q3_multi]="h @> 'env=>prod, tier=>gold'"
-  [q4_neglookup]="h @> 'env=>gold'"
-  [q5_keyexist]="h ? 'shard'"
+declare -a JPROBES=(
+  "sel_jsonb|j|j @> '{\"shard\":\"S777\"}'"
+  "med_jsonb|j|j @> '{\"env\":\"prod\"}'"
+  "multi_jsonb|j|j @> '{\"env\":\"prod\",\"tier\":\"gold\"}'"
+  "neg_jsonb|j|j @> '{\"env\":\"gold\"}'"
+  "exists_jsonb|j|j ? 'shard'"
 )
-declare -A J=(
-  [q1_selective]="j @> '{\"shard\":\"S777\"}'"
-  [q2_medium]="j @> '{\"env\":\"prod\"}'"
-  [q3_multi]="j @> '{\"env\":\"prod\",\"tier\":\"gold\"}'"
-  [q4_neglookup]="j @> '{\"env\":\"gold\"}'"
-  [q5_keyexist]="j ? 'shard'"
-)
-ORDER="q1_selective q2_medium q3_multi q4_neglookup q5_keyexist"
-
-measure() {
-  local cfg="$1" qid="$2" pred="$3"
-  local f="$OUT/raw_${cfg}_${qid}.txt"
-  local best rows rech hb sql
-  sql="EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) SELECT count(*) FROM bench WHERE $pred;"
-  : > "$f"
-  for i in 1 2 3; do
-    psql -U "${PGUSER:-postgres}" -d "$DB" -X -c "SET enable_seqscan=off;" -c "$sql" >>"$f" 2>&1
-    echo "----" >>"$f"
-  done
-  best=$(grep -oE 'Execution Time: [0-9.]+' "$f" | awk '{print $3}' | sort -n | head -1)
-  rows=$(grep -oE 'actual [^)]*rows=[0-9.]+' "$f" | tail -1 | grep -oE 'rows=[0-9.]+' | tail -1 | cut -d= -f2)
-  rech=$(grep -oE 'Rows Removed by Index Recheck: [0-9]+' "$f" | tail -1 | grep -oE '[0-9]+$'); rech=${rech:-0}
-  hb=$(grep -oE 'Heap Blocks: exact=[0-9]+' "$f" | tail -1 | grep -oE '[0-9]+$'); hb=${hb:-0}
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$cfg" "$qid" "${best:-NA}" "${rows:-NA}" "$rech" "$hb" >> "$OUT/latency.tsv"
+run_probe () {
+  local cfg="$1" label="$2" pred="$3"
+  local f="$RAW/${cfg}__${label}.txt"
+  $PSQL -c "SET enable_seqscan=$SEQ; SET enable_bitmapscan=$BMP; SET enable_indexscan=$BMP;
+            EXPLAIN (ANALYZE, BUFFERS, COSTS off) SELECT count(*) FROM bench WHERE $pred;" >/dev/null 2>&1
+  $PSQL -c "SET enable_seqscan=$SEQ; SET enable_bitmapscan=$BMP; SET enable_indexscan=$BMP;
+            EXPLAIN (ANALYZE, BUFFERS, COSTS off) SELECT count(*) FROM bench WHERE $pred;" > "$f" 2>&1
+  local et rr rows bh
+  et=$(grep -oP 'Execution Time: \K[0-9.]+' "$f" | tail -1); et=${et:-NA}
+  rr=$(grep -oP 'Rows Removed by Index Recheck: \K[0-9]+' "$f" | tail -1); rr=${rr:-0}
+  rows=$(grep -oP 'Bitmap Heap Scan.*actual rows=\K[0-9.]+' "$f" | tail -1)
+  [ -z "${rows:-}" ] && rows=$(grep -oP 'Seq Scan.*actual rows=\K[0-9.]+' "$f" | tail -1)
+  rows=${rows:-NA}
+  bh=$(grep -oP 'shared hit=\K[0-9]+' "$f" | awk '{s+=$1} END{print s+0}')
+  { echo "$cfg,$label:exec_ms,$et"; echo "$cfg,$label:recheck_removed,$rr"; echo "$cfg,$label:heap_rows,$rows"; echo "$cfg,$label:shared_hit,$bh"; } >> "$CSV"
 }
-
-printf 'config\tqid\texec_ms_best\trows\trecheck_removed\theap_blocks_exact\n' >> "$OUT/latency.tsv"
-$PSQL -c "DROP INDEX IF EXISTS bx;" >/dev/null
-for qid in $ORDER; do measure none "$qid" "${H[$qid]}"; done
-
-for cfg in std hash jsonb_ops jpath; do
-  $PSQL -c "DROP INDEX IF EXISTS bx;" >/dev/null
-  T0=$(date +%s%N); $PSQL -c "${IDX[$cfg]}" >/dev/null; T1=$(date +%s%N)
-  printf '%s_build_ms\t%s\n' "$cfg" "$(( (T1-T0)/1000000 ))" >> "$OUT/sizes.tsv"
-  printf '%s_index_bytes\t%s\n' "$cfg" "$(q "SELECT pg_relation_size('bx');")" >> "$OUT/sizes.tsv"
-  for qid in $ORDER; do
-    if [[ "$cfg" == jsonb_ops || "$cfg" == jpath ]]; then pred="${J[$qid]}"; else pred="${H[$qid]}"; fi
-    if [[ "$cfg" == jpath && "$qid" == q5_keyexist ]]; then
-      printf '%s\t%s\tNA\tNA\tNA\tNA\n' "$cfg" "$qid" >> "$OUT/latency.tsv"; continue
-    fi
-    measure "$cfg" "$qid" "$pred"
-  done
-done
-echo "== done; see $OUT/sizes.tsv and $OUT/latency.tsv =="
+echo ">> config: none (seqscan)"
+SEQ=on; BMP=off
+for p in "${HPROBES[@]}" "${JPROBES[@]}"; do IFS='|' read -r l c pred <<<"$p"; run_probe none "$l" "$pred"; done
+bench_index () {
+  local cfg="$1" create="$2" rel="$3"; shift 3
+  echo ">> config: $cfg (build index)"
+  local t
+  t=$($PSQL -c '\timing on' -c "$create" 2>&1 | grep -oP 'Time: \K[0-9.]+' | tail -1)
+  echo "$cfg,build_ms,${t:-NA}" >> "$CSV"
+  local sz; sz=$($PSQL -tAc "SELECT pg_relation_size('$rel')")
+  echo "$cfg,index_bytes,${sz:-NA}" >> "$CSV"
+  SEQ=off; BMP=on
+  for p in "$@"; do IFS='|' read -r l c pred <<<"$p"; run_probe "$cfg" "$l" "$pred"; done
+  $PSQL -c "DROP INDEX $rel;"
+}
+bench_index gin_std        "CREATE INDEX bench_gin_std  ON bench USING gin (h gin_hstore_ops);"      bench_gin_std  "${HPROBES[@]}"
+bench_index gin_hash       "CREATE INDEX bench_gin_hash ON bench USING gin (h gin_hstore_hash_ops);" bench_gin_hash "${HPROBES[@]}"
+bench_index jsonb_ops      "CREATE INDEX bench_jb1 ON bench USING gin (j jsonb_ops);"                bench_jb1 "${JPROBES[@]}"
+bench_index jsonb_path_ops "CREATE INDEX bench_jb2 ON bench USING gin (j jsonb_path_ops);"           bench_jb2 "${JPROBES[@]:0:4}"
+echo ">> done. summary: $CSV"

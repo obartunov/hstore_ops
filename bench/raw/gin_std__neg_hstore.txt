@@ -1,0 +1,19 @@
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Aggregate (actual time=168.533..168.535 rows=1.00 loops=1)
+   Buffers: shared hit=39114
+   ->  Bitmap Heap Scan on bench (actual time=168.530..168.530 rows=0.00 loops=1)
+         Recheck Cond: (h @> '"env"=>"gold"'::hstore)
+         Rows Removed by Index Recheck: 333575
+         Heap Blocks: exact=38833
+         Buffers: shared hit=39114
+         ->  Bitmap Index Scan on bench_gin_std (actual time=43.475..43.476 rows=333575.00 loops=1)
+               Index Cond: (h @> '"env"=>"gold"'::hstore)
+               Index Searches: 1
+               Buffers: shared hit=281
+ Planning:
+   Buffers: shared hit=97
+ Planning Time: 0.395 ms
+ Execution Time: 169.085 ms
+(15 rows)
+
