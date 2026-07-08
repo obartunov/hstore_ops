@@ -1,0 +1,166 @@
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION hstore_hash_ops;
+CREATE TABLE hht (id int, h hstore);
+INSERT INTO hht VALUES
+  (1,  ''),
+  (2,  'a=>1'),
+  (3,  'a=>1, b=>2'),
+  (4,  'a=>1, b=>2, c=>3'),
+  (5,  'k=>NULL'),
+  (6,  'k=>""'),
+  (7,  'k=>"NULL"'),
+  (8,  'a=>2, a=>1'),
+  (9,  'shared=>v1, other=>a'),
+  (10, 'shared=>v2, other=>b'),
+  (11, 'ключ=>значение'),
+  (12, 'café=>naïve');
+CREATE INDEX hht_hash ON hht USING gin (h gin_hstore_hash_ops);
+SET enable_seqscan = off;
+-- containment
+SELECT id FROM hht WHERE h @> '' ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+  9
+ 10
+ 11
+ 12
+(12 rows)
+
+SELECT id FROM hht WHERE h @> 'a=>1' ORDER BY id;
+ id 
+----
+  2
+  3
+  4
+(3 rows)
+
+SELECT id FROM hht WHERE h @> 'a=>1, b=>2' ORDER BY id;
+ id 
+----
+  3
+  4
+(2 rows)
+
+SELECT id FROM hht WHERE h @> 'a=>2' ORDER BY id;           -- row 8 normalizes to a=>2 (first dup wins)
+ id 
+----
+  8
+(1 row)
+
+SELECT id FROM hht WHERE h @> 'k=>NULL' ORDER BY id;
+ id 
+----
+  5
+(1 row)
+
+SELECT id FROM hht WHERE h @> 'k=>""' ORDER BY id;
+ id 
+----
+  6
+(1 row)
+
+SELECT id FROM hht WHERE h @> 'k=>"NULL"' ORDER BY id;
+ id 
+----
+  7
+(1 row)
+
+SELECT id FROM hht WHERE h @> 'shared=>v1, other=>b' ORDER BY id;  -- key+val exist, not this pair-set
+ id 
+----
+(0 rows)
+
+SELECT id FROM hht WHERE h @> 'ключ=>значение' ORDER BY id;
+ id 
+----
+ 11
+(1 row)
+
+SELECT id FROM hht WHERE h @> 'café=>naïve' ORDER BY id;
+ id 
+----
+ 12
+(1 row)
+
+-- key existence
+SELECT id FROM hht WHERE h ? 'a' ORDER BY id;
+ id 
+----
+  2
+  3
+  4
+  8
+(4 rows)
+
+SELECT id FROM hht WHERE h ? 'k' ORDER BY id;
+ id 
+----
+  5
+  6
+  7
+(3 rows)
+
+SELECT id FROM hht WHERE h ? 'shared' ORDER BY id;
+ id 
+----
+  9
+ 10
+(2 rows)
+
+SELECT id FROM hht WHERE h ? 'nope' ORDER BY id;
+ id 
+----
+(0 rows)
+
+-- any / all
+SELECT id FROM hht WHERE h ?| ARRAY['a','nope'] ORDER BY id;
+ id 
+----
+  2
+  3
+  4
+  8
+(4 rows)
+
+SELECT id FROM hht WHERE h ?| ARRAY['nope','missing'] ORDER BY id;
+ id 
+----
+(0 rows)
+
+SELECT id FROM hht WHERE h ?& ARRAY['a','b'] ORDER BY id;
+ id 
+----
+  3
+  4
+(2 rows)
+
+SELECT id FROM hht WHERE h ?& ARRAY['shared','other'] ORDER BY id;
+ id 
+----
+  9
+ 10
+(2 rows)
+
+SELECT id FROM hht WHERE h ?& ARRAY['a','nope'] ORDER BY id;
+ id 
+----
+(0 rows)
+
+-- recheck flag must be set: the bitmap heap scan carries a Recheck Cond
+SELECT count(*) FROM hht WHERE h @> 'a=>1';
+ count 
+-------
+     3
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE hht;
+DROP EXTENSION hstore_hash_ops;

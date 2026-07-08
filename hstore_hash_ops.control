@@ -1,0 +1,6 @@
+# hstore_hash_ops extension
+comment = 'hash-based GIN operator class for hstore (smaller, more selective @>)'
+default_version = '1.0'
+module_pathname = '$libdir/hstore_hash_ops'
+relocatable = true
+requires = 'hstore'
