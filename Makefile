@@ -1,7 +1,7 @@
 # hstore_hash_ops/Makefile
 
 MODULE_big = hstore_hash_ops
-OBJS = hstore_compat.o hstore_ops.o
+OBJS = hstore_compat.o hstore_ops.o hstore_pair_ops.o
 
 EXTENSION = hstore_hash_ops
 DATA = hstore_hash_ops--1.0.sql

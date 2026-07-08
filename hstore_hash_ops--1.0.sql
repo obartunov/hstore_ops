@@ -41,3 +41,37 @@ AS
 	FUNCTION        4       gin_consistent_hstore_hash(internal, int2, internal, int4, internal, internal),
 	FUNCTION        5       gin_compare_partial_hstore_hash(int8, int8, int2, internal),
 	STORAGE         int8;
+
+/* ---- exact tagged-pair opclass: non-lossy @> and ?/?|/?& ---- */
+CREATE FUNCTION gin_compare_hstore_pair(bytea, bytea)
+RETURNS int4
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gin_extract_hstore_pair(internal, internal)
+RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gin_extract_hstore_query_pair(internal, internal, int2, internal, internal)
+RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION gin_consistent_hstore_pair(internal, int2, internal, int4, internal, internal)
+RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR CLASS gin_hstore_pair_ops
+FOR TYPE hstore USING gin
+AS
+	OPERATOR        7       @>,
+	OPERATOR        9       ?(hstore,text),
+	OPERATOR        10      ?|(hstore,text[]),
+	OPERATOR        11      ?&(hstore,text[]),
+	FUNCTION        1       gin_compare_hstore_pair(bytea, bytea),
+	FUNCTION        2       gin_extract_hstore_pair(internal, internal),
+	FUNCTION        3       gin_extract_hstore_query_pair(internal, internal, int2, internal, internal),
+	FUNCTION        4       gin_consistent_hstore_pair(internal, int2, internal, int4, internal, internal),
+	STORAGE         bytea;
