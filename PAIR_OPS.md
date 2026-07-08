@@ -123,6 +123,26 @@ heap-bound for everyone and slightly worse for pair because its index is
 larger. On the negative lookup it ties the hash opclass (both answer from the
 index with no heap access).
 
+## Limitations
+
+Like the default `gin_hstore_ops`, this opclass indexes raw key/value bytes, so
+a single key or value that does not compress below GIN's per-entry limit
+(~2712 bytes on an 8 KB page) makes index build fail:
+
+```
+ERROR:  index row size 3224 exceeds maximum 2712 for index ...
+```
+
+This is a real limit on catalog-like data. `SELECT hstore(t) FROM pg_proc t`
+contains high-entropy values (`prosrc`, `prosqlbody`, up to ~19 KB) and
+`CREATE INDEX ... gin_hstore_pair_ops` fails on it — as does the default
+opclass. Highly compressible long values (e.g. `repeat('x',5000)`) index fine
+because the stored tuple is compressed under the limit; high-entropy long
+values do not. The **hash** opclass is immune: it hashes every pair to 8 bytes
+and indexes arbitrary hstore regardless of key/value length. So for hstore
+columns that may hold long high-entropy values, `gin_hstore_hash_ops` is the
+only usable GIN opclass of the three.
+
 ## 4. Conclusion
 
 `gin_hstore_pair_ops` is **not a universal winner** on cost. It is a
@@ -140,3 +160,5 @@ The strong claim is not "a faster hstore index." The strong claim is:
 > `gin_hstore_pair_ops` provides an exact, recheck-free GIN representation for
 > both hstore containment and key-existence operators by indexing separate key
 > and key/value entries.
+
+Note the entry-size limitation above: `pair_ops` (like the default opclass) cannot index hstore with long high-entropy values; only `gin_hstore_hash_ops` can.
