@@ -28,6 +28,11 @@ RETURNS bool
 AS 'MODULE_PATHNAME'
 LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION gin_triconsistent_hstore_hash(internal, int2, internal, int4, internal, internal, internal)
+RETURNS "char"
+AS 'MODULE_PATHNAME'
+LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE OPERATOR CLASS gin_hstore_hash_ops
 FOR TYPE hstore USING gin
 AS
@@ -40,4 +45,5 @@ AS
 	FUNCTION        3       gin_extract_hstore_query_hash(internal, internal, int2, internal, internal),
 	FUNCTION        4       gin_consistent_hstore_hash(internal, int2, internal, int4, internal, internal),
 	FUNCTION        5       gin_compare_partial_hstore_hash(int8, int8, int2, internal),
+	FUNCTION        6       gin_triconsistent_hstore_hash(internal, int2, internal, int4, internal, internal, internal),
 	STORAGE         int8;

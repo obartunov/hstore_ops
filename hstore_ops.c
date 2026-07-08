@@ -273,3 +273,59 @@ gin_consistent_hstore_hash(PG_FUNCTION_ARGS)
 
 	PG_RETURN_BOOL(res);
 }
+
+/*
+ * triConsistent: tri-state variant of consistent, enabling GIN fast-scan.
+ *
+ * We never return GIN_TRUE, only GIN_MAYBE or GIN_FALSE: the index is lossy
+ * (two distinct pairs/keys can share a hash), so a heap recheck is always
+ * required, exactly as gin_consistent_hstore_hash forces *recheck = true.
+ * Returning GIN_FALSE when a required entry is provably absent is what lets
+ * GIN skip past items and drive multi-key scans off the rarest entry, instead
+ * of falling back to shimTriConsistentFn (which enumerates 2^n combinations
+ * and gives up entirely above MAX_MAYBE_ENTRIES = 4 maybe-inputs).
+ */
+PG_FUNCTION_INFO_V1(gin_triconsistent_hstore_hash);
+Datum
+gin_triconsistent_hstore_hash(PG_FUNCTION_ARGS)
+{
+	GinTernaryValue *check = (GinTernaryValue *) PG_GETARG_POINTER(0);
+	StrategyNumber strategy = PG_GETARG_UINT16(1);
+
+	/* HStore    *query = PG_GETARG_HSTORE_P(2); */
+	int32		nkeys = PG_GETARG_INT32(3);
+	GinTernaryValue res = GIN_MAYBE;
+	int32		i;
+
+	if (strategy == HStoreContainsStrategyNumber ||
+		strategy == HStoreExistsAllStrategyNumber)
+	{
+		/* All queried entries must be present */
+		for (i = 0; i < nkeys; i++)
+		{
+			if (check[i] == GIN_FALSE)
+			{
+				res = GIN_FALSE;
+				break;
+			}
+		}
+	}
+	else if (strategy == HStoreExistsStrategyNumber ||
+			 strategy == HStoreExistsAnyStrategyNumber)
+	{
+		/* At least one queried entry must be present */
+		res = GIN_FALSE;
+		for (i = 0; i < nkeys; i++)
+		{
+			if (check[i] != GIN_FALSE)
+			{
+				res = GIN_MAYBE;
+				break;
+			}
+		}
+	}
+	else
+		elog(ERROR, "unrecognized strategy number: %d", strategy);
+
+	PG_RETURN_GIN_TERNARY_VALUE(res);
+}
